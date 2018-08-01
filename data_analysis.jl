@@ -1,4 +1,63 @@
 
+# ADAPTER TRIMMING AND ALIGNMENT
+echo *_1.fq.gz | parallel -n1 '[ ! -e ../alignments/${x/_1.fq.gz/.bam} ] &&
+mkfifo ${x/.fq.gz/.reads.pipe} && 
+mkfifo ${x/_1.fq.gz/_2.reads.pipe} && 
+(cutadapt -f fastq -m 20 -a AGATCGGAAGAGC -A AGATCGGAAGAGC $x ${x/_1.fq/_2.fq} -o >(fasta trim by quality - 30 | fasta mask by quality - 20 | fasta to raw - > ${x/.fq.gz/.reads.pipe}) -p >(fasta trim by quality - 30 | fasta mask by quality - 20 | fasta to raw - > ${x/_1.fq.gz/_2.reads.pipe}) &) && 
+bowtie2 -r -p8 -X 1000 --score-min L,0,-0.6 -x ~/tools/bowtie2-indexes/homo_sapiens/hg38 -1 ${x/.fq.gz/.reads.pipe} -2 ${x/_1.fq.gz/_2.reads.pipe} | samblaster | samtools view -u - | samtools sort -@8 -o ../alignments/${x/_1.fq.gz/.bam} -; 
+rm ${x/.fq.gz/.reads.pipe} ${x/_1.fq.gz/_2.reads.pipe}'
+echo *.bam | parallel -n8 '[ ! -e ${x}.bai ] && samtools index $x'
+
+
+
+
+
+
+
+# ESTIMATE PANEL SIZE BY CALCULATING COVERAGE HISTOGRAM FOR ENTIRE GENOME
+echo *-UMI.bam | parallel -n8 'samtools view -b -q10 -F 0x400 $x | bedtools genomecov -ibam stdin -g ~/homo_sapiens/hg38.chrom.sizes > ../coverage_histograms/${x/.bam/.tsv}'
+
+tsv_files = readdir();
+histogram = zeros(2000, length(tsv_files));
+total = zeros(1, length(tsv_files));
+human_chr = vcat(map(x -> "chr$(x)", 1:22), ["chrX", "chrY"]);
+for (s, tsv_file) in enumerate(tsv_files)
+	d = readtsv(tsv_file)
+	for chr in human_chr
+		total[s] += d[findfirst(x -> x == chr, d[:, 1]), 4]
+		for r in find((d[:, 1] .== chr) & (d[:, 2] .< 2000))
+			histogram[d[r, 2] + 1, s] += d[r, 3]
+		end
+	end
+end
+
+threshold = 100;
+for s in 1:length(tsv_files)
+	captured = round(Int, total[s] - sum(histogram[1:threshold, s]))
+	println("$(tsv_files[s]): $(captured)")
+end
+median(map(s -> total[s] - sum(histogram[1:threshold, s]),
+	1:length(tsv_files)))
+total[1] - sum(median(histogram, 2)[1:threshold])
+
+
+
+
+
+
+
+
+
+# IDENTIFY SOMATIC MUTATIONS AND GERMLINE VARIANTS IN TARGETED PANEL
+echo X `seq 22` Y | parallel -n5 'mutato call2 --region=chr${x} --alt-reads=8 --alt-frac=0.005 --min-mapq=0 ~/homo_sapiens/hg38.fa *.bam > ../mutations/chr${x}.vcf'
+cat chr1.vcf <(cat chr{2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,X,Y}.vcf | grep -v 'CHROM\|##') > variants.vcf
+variant nearby indels variants.vcf | variant somatic --alt-reads=10 --alt-frac=0.01 --test-ref-ratio=3 --test-bg-ratio=25 --ref-reads=20 --min-sidedness=15 --min-mapq=10 - ../tumor_normal_pairs.txt | variant predict effect - | variant mappability - ~/homo_sapiens/mappability_170bp_hg38.jld 90 | variant discard sketchy silent - | variant annotate - ~/homo_sapiens/cosmic_77_hg38.jld | variant annotate - ~/homo_sapiens/exac_0.3_hg38.jld | variant discard if frequency above - ~/homo_sapiens/exac_0.3_hg38.jld 0.005 > somatic.vcf
+
+
+
+
+
+
 # SUPPLEMENTARY TABLE 1: LIQUID BIOPSIES
 using Distributions
 d = readtsv("table_s4_mutations.tsv");
@@ -77,83 +136,19 @@ for s in 1:length(samples)
 	end
 end
 
-# Print final results
-d = readtsv("table_s1.tsv", text=true);
-printed = zeros(Int, 0);
-for r in 1:size(d, 1)
-	cohort = d[r, 2]
-	timepoint = d[r, 3]
-	print(join(d[r, 1:3], '\t'))
-	s = 0
-	if cohort == "Abi-enza"
-		if timepoint == "1st progression"; timepoint = "Progression"; end
-		if timepoint == "2nd progression"; timepoint = "Progression2"; end
-		s = findone(x -> endswith(x, "-$(d[r,1])-$(timepoint)") && !startswith(x, "OZM"), samples)
-	elseif cohort == "VCCD"
-		s = findone(x -> x == "VCCD-$(d[r,1])-$(timepoint)", samples)
-	elseif cohort == "WCDT"
-		if timepoint == "1st progression"; timepoint = "Progression"; end
-		if timepoint == "2nd progression"; timepoint = "Progression2"; end
-		s = findone(x -> x == "$(d[r,1])-Liquid-$(timepoint)", samples)
-	elseif cohort == "IND223"
-		s = findone(x -> startswith(x, "IND223-$(d[r,1])") && endswith(x, "-cfDNA"), samples)
-	elseif cohort == "IND232"
-		s = findone(x -> x == "$(d[r,1])-$(timepoint)", samples)
-	elseif cohort == "GU cohort"
-		s = findone(x -> x == "$(d[r,1])-$(timepoint)", samples)
-	elseif cohort == "OZM-054"
-		s = findone(x -> x == "OZM-054-$(d[r,1])-$(timepoint)", samples)
-	else
-		error("Unrecognized cohort.")
-	end
-	if s > 0
-		push!(printed, s)
-		@printf("\t%d\t%d\t%d\t%d\t%d\n", cancer_frac[s] * 100,
-			total_somatic[s], total_somatic_cds[s], total_somatic_5utr[s],
-			total_somatic_3utr[s])
-	else
-		print("\t0\t0\t0\t0\t0\n")
-	end
-end
-
 # How many total in coding regions, UTRs, and intronic/intergenic?
 sum(total_somatic_cds)
 sum(total_somatic_5utr) + sum(total_somatic_3utr)
 2000 - sum(total_somatic_cds) - sum(total_somatic_5utr) - sum(total_somatic_3utr)
 
-#println("Samples that were not printed:")
-#for s in setdiff(1:length(samples), printed); println(samples[s]); end
 
 
-# Count bladder cancer mutations
-variant discard blacklisted ~/tmp/somatic.vcf ~/tmp/blacklist.tsv > ~/datasets/foxa1_utr/table_sx_bladder_cancer_mutations.tsv
-cd ~/datasets/foxa1_utr
-using Variant
-vcf = read_vcf("table_sx_bladder_cancer_mutations.tsv");
-cfdna = contains.(vcf.sample, "-cfDNA");
-vcf = vcf[:, cfdna]; samples = vcf.sample; S = length(samples);
-somatic_mut = zeros(Int, S);
-cds_mut = zeros(Int, S); utr5_mut = zeros(Int, S); utr3_mut = zeros(Int, S);
-for r in 1:size(vcf, 1)
-	if is_coding_region(vcf.effect[r])
-		cds_mut += vcf.star[r, :]
-	elseif contains(vcf.effect[r], "5'-UTR")
-		utr5_mut += vcf.star[r, :]
-	elseif contains(vcf.effect[r], "3'-UTR")
-		utr3_mut += vcf.star[r, :]
-	end
-	somatic_mut += vcf.star[r, :]
-end
-for s in 1:S
-	println("$(samples[s])\t$(somatic_mut[s])\t$(cds_mut[s])\t$(utr5_mut[s])\t$(utr3_mut[s])")
-end
 
 
 
 
 
 # RESULTS: CALCULATE SOMATIC MUTATION RATES
-cd ~/datasets/foxa1_utr
 
 # Figure 1B barplot
 with_ctdna = 439;

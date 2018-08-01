@@ -3,4 +3,4 @@ This repository contains code used to generate the results in study "Frequent mu
 
 Data analysis code was written to be executed with version 0.6.2 of the Julia programming language.
 
-Somatic mutation analysis code (mutato.rs) was written to be executed with version 1.24 of the Rust programming language.
+Somatic mutation analysis code (mutato.rs) was written to be executed with version 1.27 (or later) of the Rust programming language.

@@ -148,30 +148,97 @@ sum(total_somatic_5utr) + sum(total_somatic_3utr)
 
 
 
+
+# SHARED CODE FOR COUNTING MUTATION STATISTICS
+struct Region
+	chromosome::String
+	start::Int
+	stop::Int
+	len::Int
+	covered_len::Int
+	gene::String
+	class::String
+end
+d = readtsv("table_s5_gene_regions.tsv"); d = d[2:end, :];
+d = d[d[:, 5] .!= "N/A", :];
+regions = [Region(d[r, 4], d[r, 5], d[r, 6], d[r, 6] - d[r, 5] + 1,
+	d[r, 8], d[r, 1], d[r, 3]) for r in 1:size(d, 1)];
+
+d = readtsv("sample_name_to_patient.tsv");
+sample_to_patient = Dict(d[r, 1] => d[r, 2] for r in 1:size(d, 1));
+
+struct Mutation
+	chromosome::String
+	position::Int
+	ref_allele::String
+	alt_allele::String
+	alt_frac::Float64
+	mut_len::Int
+	in_cds::Bool
+	in_utr3::Bool
+	in_utr5::Bool
+	gene::String
+	sample::String
+	patient::String
+	indel::Bool
+	primary::Bool   # If mutation found at multiple TP, only one is primary
+end
+
+using Variant
+d = readtsv("table_s4_mutations.tsv"); d = d[2:end, :];
+mutations = Vector{Mutation}(0);
+for m in 1:size(d, 1)
+	ref_allele = d[m, 4]; alt_allele = d[m, 5]
+	position = Int(d[m, 3])
+	mut_len = length(ref_allele) - length(alt_allele) + 1
+	if mut_len < 1; mut_len = 1; end
+
+	in_cds = false; in_utr3 = false; in_utr5 = false; gene = ""
+	for r in regions
+		if r.chromosome != d[m, 2]; continue; end
+		if r.start <= position <= r.stop || r.start <= position + mut_len - 1 <= r.stop
+			if r.class == "CDS"; in_cds = true; end
+			if r.class == "5'-UTR"; in_utr5 = true; end
+			if r.class == "3'-UTR"; in_utr3 = true; end
+			gene = r.gene
+		end
+	end
+
+	patient = sample_to_patient[d[m, 1]]
+	alt_frac = d[m, 8] == "" ? NaN : parse(Float64, rstrip(d[m, 8], '%')) / 100
+	primary = !any(m -> m.position == position && m.ref_allele == ref_allele && m.alt_allele == alt_allele && m.patient == patient, mutations)
+	
+	push!(mutations, Mutation(d[m, 2], position, ref_allele, alt_allele,
+		alt_frac, mut_len, in_cds, in_utr3, in_utr5, gene,
+		d[m, 1], patient, is_indel(ref_allele, alt_allele), primary))
+end
+
+
+
+
+
+
+
+
+
+
 # RESULTS: CALCULATE SOMATIC MUTATION RATES
 
 # Figure 1B barplot
-with_ctdna = 439;
+with_ctdna = length(unique([m.sample for m in mutations]));
 total_cds_len = sum([r.len for r in regions if r.class == "CDS"]) / 1e6;
-total_utr5_len = sum(covered_len[region_type .== "5'-UTR"]) / 1e6;
-total_utr3_len = sum(covered_len[region_type .== "3'-UTR"]) / 1e6;
+total_utr5_len = sum([r.len for r in regions if r.class == "5'-UTR"]) / 1e6;
+total_utr3_len = sum([r.len for r in regions if r.class == "3'-UTR"]) / 1e6;
 
-cds_mutations / total_cds_len / with_ctdna
-utr5_mutations / total_utr5_len / with_ctdna
-utr3_mutations / total_utr3_len / with_ctdna
+count(m.in_cds for m in mutations) / total_cds_len / with_ctdna
+count(m.in_utr5 for m in mutations) / total_utr5_len / with_ctdna
+count(m.in_utr3 for m in mutations) / total_utr3_len / with_ctdna
 (utr5_mutations + utr3_mutations) / (total_utr5_len + total_utr3_len) / with_ctdna
 
 using Distributions
 1 - cdf(Binomial(cds_mutations + utr5_mutations + utr3_mutations, total_cds_len / (total_cds_len + total_utr5_len + total_utr3_len)), cds_mutations)
 
-# What fraction substitutions, what fraction indels?
-count(m -> m.region == "CDS" && m.indel, mutations) / count(m -> m.region == "CDS", mutations)
-count(m -> endswith(m.region, "UTR") && m.indel, mutations) / count(m -> endswith(m.region, "UTR"), mutations)
 
-using Statistics
-valid = [m.region == "CDS" || endswith(m.region, "UTR") for m in mutations];
-fisher_exact([m.region == "CDS" for m in mutations[valid]],
-	[m.indel for m in mutations[valid]])
 
 
 
